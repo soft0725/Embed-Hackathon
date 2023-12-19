@@ -1,113 +1,68 @@
-/*
- C#109-1 사물인터넷보드(wemos d1r1)에 온습도센서(DHT11)을 D3에 연결했다!
- 온습도센서에서 온도와 습도를 측정해서 MQTT BROKER로 Publish 해보자!
-*/
-
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <PubSubClient.h>
+#include <MySQL_Connection.h>
+#include <MySQL_Cursor.h>
 #include "DHT.h"
 
 #define DHTPIN 33
-#define DHTTYPE DHT11 
+#define DHTTYPE DHT11
 #define led 15
-
-// Update these with values suitable for your network.
-DHT dht(DHTPIN, DHTTYPE);
 
 const char* ssid = "bssm_free";
 const char* password = "bssm_free";
 const char* mqtt_server = "broker.mqtt-dashboard.com";
 
+IPAddress server_addr(192, 168, 1, 100); // MySQL 서버의 IP 주소
+char user[] = "root";                    // MySQL 사용자 이름
+char password_db[] = "1234";             // MySQL 비밀번호
+char default_db[] = "projectwinter";     // MySQL 데이터베이스 이름
+
+WiFiClient wifiClient;                   // WiFi 클라이언트
+MySQL_Connection conn((Client *)&wifiClient); // MySQL 연결
+PubSubClient mqttClient(wifiClient);     // MQTT 클라이언트
+
+DHT dht(DHTPIN, DHTTYPE);
 WebServer server(80);
 
-WiFiClient espClient;
-PubSubClient client(espClient);
 unsigned long lastMsg = 0;
-#define MSG_BUFFER_SIZE  (50)
-char msg[MSG_BUFFER_SIZE];
+char msg[50];
 int value = 0;
 
 void setup_wifi() {
-
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
-
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-
-  randomSeed(micros());
-
   Serial.println("");
   Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-
-  server.on("/", handleRoot);
-
-  server.on("/nockanda", handleNockanda);
-
-  server.onNotFound(handleNotFound);
-
-  server.begin();
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-//    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is active low on the ESP-01)
-  } else {
-//    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
-
-}
-
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
+void mqtt_reconnect() {
+  while (!mqttClient.connected()) {
     Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
+    String clientId = "ESP32Client-";
     clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (client.connect(clientId.c_str())) {
+    if (mqttClient.connect(clientId.c_str())) {
       Serial.println("connected");
-      // Once connected, publish an announcement...
-      //client.publish("outTopic", "hello world");
-      // ... and resubscribe
-      //client.subscribe("inTopic");
     } else {
       Serial.print("failed, rc=");
-      Serial.print(client.state());
+      Serial.print(mqttClient.state());
       Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
       delay(5000);
     }
   }
 }
 
 void handleRoot() {
-  //response
   String postForms = "<html>\
   <head>\
     <meta charset=\"utf-8\">\
@@ -115,6 +70,7 @@ void handleRoot() {
   </head>\
   <body>\
     현재 시동 상태 $$led$$\
+    <br>온도: $$temp$$ °C<br>습도: $$humi$$ %<br>\
     <form method=\"post\" action=\"/nockanda\">\
       <br>0: 시동 off, 1: 시동 on<br>\
       <input type=\"text\" name=\"led\" value=\"\"><br>\
@@ -123,39 +79,33 @@ void handleRoot() {
   </body>\
 </html>";
 
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  postForms.replace("$$temp$$", String(t));
+  postForms.replace("$$humi$$", String(h));
+
   bool myled = digitalRead(led);
-  if(myled){
-    //ON
+  if(myled) {
     postForms.replace("$$led$$","ON");
-  }else{
-    //OFF
+  } else {
     postForms.replace("$$led$$","OFF");
   }
   server.send(200, "text/html", postForms);
 }
+
 void handleNockanda() {
-  //response
-  //server.args(); 서버로 post방식으로 넘어온 변수의 갯수
-  //server.argName(~) : 변수이름
-  //server.arg(~) : 값
-  
-  for(int i = 0;i<server.args();i++){
-    Serial.print(server.argName(i));
-    Serial.print(",");
-    Serial.print(server.arg(i));
-    Serial.println();
+  for(int i = 0; i < server.args(); i++){
     if(server.argName(i) == "led"){
       if(server.arg(i) == "0"){
+        value = 0;
         digitalWrite(led, LOW);
       }else if(server.arg(i) == "1"){
-       digitalWrite(led, HIGH); 
+        value = 1;
+        digitalWrite(led, HIGH); 
       }
     }
   }
-
-  //홈페이지로 리다이렉션
   String res = "<meta http-equiv=\"refresh\" content=\"0; url=http://"+WiFi.localIP().toString()+"\">";
-
   server.send(200, "text/html", res);
 }
 
@@ -165,42 +115,57 @@ void handleNotFound() {
 }
 
 void setup() {
-  pinMode(led,OUTPUT);
   Serial.begin(115200);
+  pinMode(led, OUTPUT);
   dht.begin();
   setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
+  mqttClient.setServer(mqtt_server, 1883);
+
+  if (MDNS.begin("esp32")) {
+    Serial.println("MDNS responder started");
+  }
+
+  server.on("/", handleRoot);
+  server.on("/nockanda", handleNockanda);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void saveToDatabase(float temperature, float humidity) {
+  if (conn.connect(server_addr, 3306, user, password_db, default_db)) {
+    char query[128];
+    sprintf(query, "INSERT INTO sensor_data (idx, temp, humi) VALUES (%d, %f, %f)", value, temperature, humidity);
+    value += 1;
+    MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+    cur_mem->execute(query);
+    delete cur_mem;
+    conn.close();
+  } else {
+    Serial.println("MySQL 연결 실패");
+  }
 }
 
 void loop() {
-  server.handleClient();
-  delay(2);//allow the cpu to switch to other tasks
-
-  if (!client.connected()) {
-    reconnect();
+  if (!mqttClient.connected()) {
+    mqtt_reconnect();
   }
-  client.loop();
+  mqttClient.loop();
+
+  server.handleClient();
 
   unsigned long now = millis();
   if (now - lastMsg > 2000) {
     lastMsg = now;
-    //++value;
-    //snprintf (msg, MSG_BUFFER_SIZE, "hello world #%ld", value);
-    //Serial.print("Publish message: ");
-    //Serial.println(msg);
     float h = dht.readHumidity();
-    // Read temperature as Celsius (the default)
     float t = dht.readTemperature();
-    // Read temperature as Fahrenheit (isFahrenheit = true)
-  
-    Serial.print(F("Humidity: "));
-    Serial.print(h);
-    Serial.print(F("%  Temperature: "));
-    Serial.println(t);
-    snprintf (msg, MSG_BUFFER_SIZE, "%f", t);
-    client.publish("nockanda/temp", msg);
-    snprintf (msg, MSG_BUFFER_SIZE, "%f", h);
-    client.publish("nockanda/humi", msg);
+
+    saveToDatabase(t, h);
+    snprintf (msg, 50, "%f", t);
+    mqttClient.publish("nockanda/temp", msg);
+    snprintf (msg, 50, "%f", h);
+    mqttClient.publish("nockanda/humi", msg);
+    snprintf (msg, 50, "%d", value);
+    mqttClient.publish("nockanda/led", msg);
   }
 }
